@@ -30,6 +30,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -48,8 +49,10 @@ var appversion string = "1.1"
 var tableName string
 var csvFileName string
 var keepOrigCols bool
+var completeSQL bool
 var debugSwitch bool
 var helpMe bool
+var columnNames string
 
 // init() function - always runs before main() - used here to set-up required flags variables
 // from the command line parameters provided by the user when they run the app
@@ -60,6 +63,7 @@ func init() {
 	flag.StringVar(&tableName, "t", "", "\tUSE: '-t tablename' where tablename is the name of the SQLite table to hold your CSV file data [MANDATORY]")
 	flag.StringVar(&csvFileName, "f", "", "\tUSE: '-f filename.csv' where filename.csv is the name and path to a CSV file that contains your data for conversion [MANDATORY]")
 	flag.BoolVar(&keepOrigCols, "k", false, "\tUSE: '-k=true' to keep original csv header fields as the SQL table column names")
+	flag.BoolVar(&completeSQL, "c", false, "\tUSE: '-c=true' to generate complete SQL(with column name)")
 	flag.BoolVar(&debugSwitch, "d", false, "\tUSE: '-d=true' to include additional debug output when run")
 	flag.BoolVar(&helpMe, "h", false, "\tUSE: '-h' to provide more detailed help on using this program")
 }
@@ -190,6 +194,7 @@ func main() {
 		fmt.Println("\tCSV file to use:", csvFileName)
 		fmt.Println("\tSQL table name to use:", tableName)
 		fmt.Println("\tKeep original csv header fields:", strconv.FormatBool(keepOrigCols))
+		fmt.Println("\tComplete SQL(with column name) output:", strconv.FormatBool(completeSQL))
 		fmt.Println("\tDisplay debug output when run:", strconv.FormatBool(debugSwitch))
 		fmt.Println("\tDisplay additional help:", strconv.FormatBool(helpMe))
 	}
@@ -299,42 +304,56 @@ func main() {
 		// use the tablename provided by the user
 		// TODO : - add option to skip this line if user is adding data to an existing table?
 		if lineCount == 0 {
-			strbuffer.WriteString("PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\nCREATE TABLE " + tableName + " (")
+			//strbuffer.WriteString("PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\nCREATE TABLE " + tableName + " (")
+			// if we are processing the first line used for the table column name - update the
+			// record field contents to remove the characters: space | - + @ # / \ : ( ) '
+			// from the SQL table column names. Can be overridden on command line with '-k true'
+			for i := 0; i < len(record); i++ {
+				if !keepOrigCols {
+					// for debug - output info so we can see current field being processed
+					if debugSwitch {
+						fmt.Printf("Running header clean up for '%s' ", record[i])
+					}
+					// call the function cleanHeader to do clean up on this field
+					record[i] = cleanHeader(record[i])
+					// for debug - output info so we can see any changes now made
+					if debugSwitch {
+						fmt.Printf("changed to '%s'\n", record[i])
+					}
+				}
+
+				// column list
+				if i > 0 {
+					columnNames += ","
+				}
+				columnNames += "`" + record[i] + "`"
+			}
+			columnNames = "(" + columnNames + ")"
+			lineCount = lineCount + 1
+			continue
 		}
 
 		// if any line except the first one :
 		// print the start of the SQL insert statement for the record
 		// and  - add to the temp string 'strbuffer'
 		// use the tablename provided by the user
-		if lineCount > 0 {
-			strbuffer.WriteString("INSERT INTO " + tableName + " VALUES (")
-		}
+		strbuffer.WriteString("INSERT INTO " + tableName + columnNames + " VALUES (")
+
 		// loop through each of the csv lines individual fields held in 'record'
 		// len(record) tells us how many fields are on this line - so we loop right number of times
 		for i := 0; i < len(record); i++ {
-			// if we are processing the first line used for the table column name - update the
-			// record field contents to remove the characters: space | - + @ # / \ : ( ) '
-			// from the SQL table column names. Can be overridden on command line with '-k true'
-			if (lineCount == 0) && (keepOrigCols == false) {
-				// for debug - output info so we can see current field being processed
-				if debugSwitch {
-					fmt.Printf("Running header clean up for '%s' ", record[i])
-				}
-				// call the function cleanHeader to do clean up on this field
-				record[i] = cleanHeader(record[i])
-				// for debug - output info so we can see any changes now made
-				if debugSwitch {
-					fmt.Printf("changed to '%s'\n", record[i])
-				}
-			}
 			// if a csv record field is empty or has the text "NULL" - replace it with actual NULL field in SQLite
 			// otherwise just wrap the existing content with ''
 			// TODO : make sure we don't try to create a 'NULL' table column name?
-			if len(record[i]) == 0 || record[i] == "NULL" {
+			if record[i] == "NULL" {
 				strbuffer.WriteString("NULL")
 			} else {
-				strbuffer.WriteString("\"" + record[i] + "\"")
+				record[i] = regexp.MustCompile(`\n`).ReplaceAllString(record[i], "\\n")
+				record[i] = regexp.MustCompile(`'`).ReplaceAllString(record[i], "\\'")
+				record[i] = regexp.MustCompile(`\r`).ReplaceAllString(record[i], "\\r")
+				strbuffer.WriteString("'" + record[i] + "'")
 			}
+
 			// if we have not reached the last record yet - add a coma also to the output
 			if i < len(record)-1 {
 				strbuffer.WriteString(",")
